@@ -1,149 +1,163 @@
 #!/usr/bin/env python3
 """
-Convert Stitched Planes to OME-ZARR
-===================================
-Creates a pyramidal OME-ZARR that napari can open efficiently
-Uses lazy loading - napari only loads what's visible
+CZI Parallel Stitcher - Memory-Aware Version
+============================================
+Uses multiprocessing with conservative worker count
+Memory usage: ~850 MB per worker at peak
 """
 
 import sys
+import time
 from pathlib import Path
 import numpy as np
-import zarr
-from tifffile import imread
-import dask.array as da
-from dask import delayed
+from aicspylibczi import CziFile
+from tifffile import imwrite
+from multiprocessing import Pool, cpu_count
+
+def create_linear_blend_weights(h, w, blend_pixels=80):
+    """Create blending weights with linear falloff at edges"""
+    weights = np.ones((h, w), dtype=np.float32)
+    
+    for i in range(blend_pixels):
+        alpha = i / blend_pixels
+        weights[i, :] = alpha
+        weights[-(i+1), :] = alpha
+        weights[:, i] = np.minimum(weights[:, i], alpha)
+        weights[:, -(i+1)] = np.minimum(weights[:, -(i+1)], alpha)
+    
+    return weights
+
+def stitch_single_plane(args):
+    """Worker function - stitches one plane"""
+    czi_path, z, c, output_dir = args
+    
+    try:
+        czi = CziFile(str(czi_path))
+        tile_bboxes = czi.get_all_mosaic_tile_bounding_boxes(Z=z, C=c)
+        
+        if not tile_bboxes:
+            return (z, c, False, "No tiles")
+        
+        # Canvas size
+        min_x = min(bbox.x for bbox in tile_bboxes.values())
+        min_y = min(bbox.y for bbox in tile_bboxes.values())
+        max_x = max(bbox.x + bbox.w for bbox in tile_bboxes.values())
+        max_y = max(bbox.y + bbox.h for bbox in tile_bboxes.values())
+        
+        canvas_w = max_x - min_x
+        canvas_h = max_y - min_y
+        
+        # Accumulators
+        canvas = np.zeros((canvas_h, canvas_w), dtype=np.float64)
+        weights_sum = np.zeros((canvas_h, canvas_w), dtype=np.float32)
+        
+        # Process tiles
+        for tile_info, bbox in tile_bboxes.items():
+            try:
+                tile_img, _ = czi.read_image(Z=z, C=c, M=tile_info.m_index)
+                
+                while tile_img.ndim > 2 and tile_img.shape[0] == 1:
+                    tile_img = tile_img[0]
+                
+                x_start = bbox.x - min_x
+                y_start = bbox.y - min_y
+                x_end = x_start + bbox.w
+                y_end = y_start + bbox.h
+                
+                if x_end > canvas_w or y_end > canvas_h:
+                    continue
+                
+                tile_weights = create_linear_blend_weights(bbox.h, bbox.w, blend_pixels=80)
+                
+                canvas[y_start:y_end, x_start:x_end] += tile_img.astype(np.float64) * tile_weights
+                weights_sum[y_start:y_end, x_start:x_end] += tile_weights
+                
+            except Exception:
+                continue
+        
+        # Normalize
+        mask = weights_sum > 0
+        canvas[mask] /= weights_sum[mask]
+        result = np.clip(canvas, 0, 65535).astype(np.uint16)
+        
+        # Save
+        output_path = output_dir / f"C{c}_Z{z:04d}.tif"
+        imwrite(output_path, result, compression='zlib', compressionargs={'level': 6})
+        
+        return (z, c, True, None)
+        
+    except Exception as e:
+        return (z, c, False, str(e))
 
 def main():
     # ==================== CONFIGURATION ====================
-    INPUT_DIR = "TY_Dip_2.1.1"
-    OUTPUT_ZARR = "TY-Dip_2.1.1.zarr"
-    CHUNK_SIZE = (1, 512, 512)  # (Z, Y, X) chunks for efficient access
+    CZI_FILENAME = "TY_Dip_2.1.1_Z1_Veh_488_638_Whole.czi"
+    # CZI_FILENAME = "TY_Dip_2.1.1_Z1_Veh_488_638_Whole.czi"
+    
+    OUTPUT_DIR_NAME = "TY_Dip_2.1.1"
+    N_WORKERS = 28  # Increased from 16. Peak memory: ~24GB
+                    # Your system: 32 cores, 122GB RAM - plenty of capacity
     # =======================================================
     
     script_dir = Path(__file__).resolve().parent
-    input_dir = script_dir / INPUT_DIR
-    output_path = script_dir / OUTPUT_ZARR
+    czi_path = script_dir / CZI_FILENAME
     
-    if not input_dir.exists():
-        print(f"ERROR: {input_dir} not found")
+    if not czi_path.exists():
+        print(f"ERROR: {czi_path} not found")
+        print(f"Available: {[f.name for f in script_dir.glob('*.czi')]}")
         return 1
     
-    # Get all TIFF files
-    tif_files = sorted(input_dir.glob("*.tif"))
-    if not tif_files:
-        print(f"ERROR: No TIFF files in {input_dir}")
-        return 1
+    print(f"CZI: {czi_path.name}")
+    print(f"Workers: {N_WORKERS} of {cpu_count()} CPUs")
+    print(f"Memory: ~{N_WORKERS * 0.85:.1f} GB peak usage\n")
     
-    print(f"Found {len(tif_files)} TIFF files")
+    # Get dimensions
+    czi = CziFile(str(czi_path))
+    dims = czi.get_dims_shape()[0]
+    n_z = dims['Z'][1]
+    n_c = dims['C'][1]
+    total = n_z * n_c
     
-    # Parse filenames to organize by channel
-    channels = {}
-    for tif_path in tif_files:
-        # Format: C{c}_Z{zzzz}.tif
-        parts = tif_path.stem.split('_')
-        c = int(parts[0][1:])
-        z = int(parts[1][1:])
-        
-        if c not in channels:
-            channels[c] = {}
-        channels[c][z] = tif_path
+    print(f"Dataset: {n_z} Z × {n_c} C = {total} planes\n")
     
-    n_c = len(channels)
-    n_z = max(len(z_slices) for z_slices in channels.values())
+    # Output directory
+    output_dir = script_dir / OUTPUT_DIR_NAME
+    output_dir.mkdir(exist_ok=True)
     
-    # Get image dimensions from first file
-    first_img = imread(list(channels[0].values())[0])
-    n_y, n_x = first_img.shape
-    dtype = first_img.dtype
+    # Build task list
+    tasks = [(czi_path, z, c, output_dir) for c in range(n_c) for z in range(n_z)]
     
-    print(f"\nDataset dimensions:")
-    print(f"  Channels: {n_c}")
-    print(f"  Z-slices: {n_z}")
-    print(f"  Y: {n_y}")
-    print(f"  X: {n_x}")
-    print(f"  Dtype: {dtype}")
-    print(f"  Total size: {n_c * n_z * n_y * n_x * np.dtype(dtype).itemsize / 1024**3:.1f} GB")
+    print("Starting parallel processing...")
+    start_time = time.time()
+    completed = 0
+    failed = 0
     
-    # Create lazy-loading dask array for each channel
-    print(f"\nBuilding lazy-loading arrays...")
+    # Process with pool
+    with Pool(processes=N_WORKERS) as pool:
+        for result in pool.imap_unordered(stitch_single_plane, tasks):
+            z, c, success, error = result
+            completed += 1
+            
+            if not success:
+                failed += 1
+                if failed <= 3:
+                    print(f"  Failed C{c} Z{z:04d}: {error}")
+            
+            # Progress every 50 planes
+            if completed % 50 == 0 or completed == total:
+                elapsed = time.time() - start_time
+                rate = completed / elapsed
+                eta_min = (total - completed) / rate / 60 if rate > 0 else 0
+                
+                print(f"[{completed}/{total}] {rate:.1f} pl/s | ETA {eta_min:.1f} min | Failed {failed}")
     
-    @delayed
-    def load_plane(path):
-        return imread(path)
-    
-    channel_arrays = []
-    for c in sorted(channels.keys()):
-        z_slices = sorted(channels[c].keys())
-        
-        # Create delayed array for each Z slice
-        lazy_arrays = []
-        for z in z_slices:
-            if z in channels[c]:
-                lazy_arr = da.from_delayed(
-                    load_plane(channels[c][z]),
-                    shape=(n_y, n_x),
-                    dtype=dtype
-                )
-                lazy_arrays.append(lazy_arr)
-            else:
-                # Missing slice - fill with zeros
-                lazy_arrays.append(da.zeros((n_y, n_x), dtype=dtype))
-        
-        # Stack along Z
-        channel_stack = da.stack(lazy_arrays, axis=0)
-        channel_arrays.append(channel_stack)
-    
-    # Stack channels
-    volume = da.stack(channel_arrays, axis=0)
-    print(f"  Dask array shape: {volume.shape} (C, Z, Y, X)")
-    
-    # Rechunk for efficient access
-    print(f"  Rechunking to {CHUNK_SIZE}...")
-    volume = volume.rechunk({0: 1, 1: CHUNK_SIZE[0], 2: CHUNK_SIZE[1], 3: CHUNK_SIZE[2]})
-    
-    # Write to OME-ZARR
-    print(f"\nWriting to {output_path}...")
-    print(f"  This will write on-demand as napari accesses data")
-    
-    # Create zarr store
-    store = zarr.DirectoryStore(str(output_path))
-    root = zarr.group(store=store, overwrite=True)
-    
-    # Write multiscale pyramid (just full resolution for now)
-    # Napari will create downsampled versions on the fly if needed
-    dataset = root.create_dataset(
-        '0',
-        shape=volume.shape,
-        chunks=(1, CHUNK_SIZE[0], CHUNK_SIZE[1], CHUNK_SIZE[2]),
-        dtype=dtype,
-        compressor=zarr.Blosc(cname='zstd', clevel=3, shuffle=2)
-    )
-    
-    # Store data
-    print(f"  Computing and storing chunks (this may take a few minutes)...")
-    da.to_zarr(volume, dataset)
-    
-    # Add OME-ZARR metadata
-    root.attrs['multiscales'] = [{
-        'version': '0.4',
-        'axes': [
-            {'name': 'c', 'type': 'channel'},
-            {'name': 'z', 'type': 'space', 'unit': 'micrometer'},
-            {'name': 'y', 'type': 'space', 'unit': 'micrometer'},
-            {'name': 'x', 'type': 'space', 'unit': 'micrometer'}
-        ],
-        'datasets': [
-            {'path': '0', 'coordinateTransformations': [{'type': 'scale', 'scale': [1, 1, 1, 1]}]}
-        ]
-    }]
-    
+    # Summary
+    elapsed = time.time() - start_time
     print(f"\n{'='*60}")
-    print(f"Complete!")
-    print(f"  Output: {output_path}")
-    print(f"  Size on disk: {sum(f.stat().st_size for f in output_path.rglob('*') if f.is_file()) / 1024**3:.1f} GB")
-    print(f"\nTo view in napari:")
-    print(f"  napari {output_path}")
+    print(f"Complete: {completed - failed}/{total} planes in {elapsed/60:.1f} min")
+    print(f"Rate: {completed/elapsed:.1f} planes/second")
+    print(f"Failed: {failed}")
+    print(f"Output: {output_dir}")
     print(f"{'='*60}")
     
     return 0
