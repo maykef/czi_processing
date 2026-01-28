@@ -6,4 +6,4 @@ Run stitch_to_tif.py, the name of the file is hardcoded inside the script.
 
 Transform the tif files to a zarr pyramid using tif_to_zarr.py
 
-View images with napari_zarr.py
+View images with napari_zarr.py: NAPARI_ASYNC=1 python napari_zarr.py
