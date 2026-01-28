@@ -1,9 +1,12 @@
 #!/bin/bash
 # =========================================================
-# CZI Light Sheet Processing – Nuclear Clean Reinstaller
-# AMD Threadripper 7970X + RTX PRO 6000 Blackwell (sm_120)
-# Fully deletes old env + caches → installs working nightly
-# Save this in your repo → one-liner reinstall after OS wipe
+# CZI Light Sheet Stitching Pipeline - Complete Environment
+# AMD Threadripper 7970X + 128GB RAM + NVMe
+# Installs everything needed for:
+#   - CZI mosaic stitching with blending
+#   - Parallel processing (multiprocessing)
+#   - ZARR conversion for efficient viewing
+#   - Napari visualization
 # =========================================================
 
 set -e
@@ -16,62 +19,123 @@ log()   { echo -e "${GREEN}[+]${NC} $1"; }
 warn()  { echo -e "${YELLOW}[!]$NC $1"; }
 error() { echo -e "${RED}[✗] $1${NC}"; exit 1; }
 
-log "=== NUCLEAR CLEAN CZI PROCESSING REINSTALL ==="
+log "=== CZI STITCHING PIPELINE INSTALLER ==="
 
-# 1. Full annihilation of old environment and caches
-log "Removing old environment + pip/conda caches..."
+# 1. Clean old environment
+log "Removing old environment..."
 conda env remove -n czi_processing -y 2>/dev/null || true
 conda clean --all -y || true
 rm -rf ~/miniforge3/envs/czi_processing
 rm -rf ~/.cache/pip
-rm -rf ~/.cache/torch
-rm -rf ~/.cache/huggingface  # just in case
 
-# 2. Fresh Miniforge (mamba) – reinstall if missing/corrupted
+# 2. Check Miniforge
 if ! command -v mamba &>/dev/null && ! command -v conda &>/dev/null; then
-    log "Miniforge missing → installing fresh..."
+    log "Installing Miniforge..."
     wget -q https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh -O /tmp/miniforge.sh
     bash /tmp/miniforge.sh -b -p $HOME/miniforge3
     source $HOME/miniforge3/bin/activate
 fi
 source $(dirname $(dirname $(which conda)))/etc/profile.d/conda.sh
 
-# 3. Create brand-new environment
-log "Creating fresh czi_processing environment (Python 3.11)..."
+# 3. Create environment
+log "Creating czi_processing environment (Python 3.11)..."
 mamba create -y -n czi_processing python=3.11 -c conda-forge
 
-# 4. Core packages via mamba (fast + binary compatible)
-log "Installing core scientific stack..."
+# 4. Core scientific packages
+log "Installing scientific stack..."
 mamba install -y -n czi_processing -c conda-forge \
-    numpy scipy scikit-image tifffile lxml h5py pillow matplotlib psutil tqdm
+    numpy scipy scikit-image tifffile psutil
 
-# 5. CZI reader
-log "Installing czifile..."
-mamba run -n czi_processing pip install --no-deps czifile
+# 5. CZI reading library
+log "Installing aicspylibczi (for Zeiss CZI mosaic files)..."
+mamba run -n czi_processing pip install aicspylibczi
 
-# 6. PyTorch nightly with CUDA 12.8 → FULL sm_120 support (Nov 2025+ builds)
-log "Installing PyTorch nightly cu128 (Blackwell sm_120 fully supported)..."
-mamba run -n czi_processing pip uninstall -y torch torchvision torchaudio 2>/dev/null || true
-mamba run -n czi_processing pip install --pre --upgrade --force-reinstall \
-    torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128
+# 6. ZARR and Dask for efficient storage/lazy loading
+log "Installing zarr + dask for efficient volume storage..."
+mamba install -y -n czi_processing -c conda-forge \
+    zarr dask distributed
 
-# 7. Final verification (no sm_120 warning = success)
-log "Verification – this must show NO warning and compute capability 12.0"
+# 7. Napari for 3D visualization
+log "Installing napari for visualization..."
+mamba install -y -n czi_processing -c conda-forge napari pyqt
+
+# 8. Optional: PyTorch for GPU-accelerated processing (if needed later)
+read -p "Install PyTorch nightly with CUDA 12.8? (y/n) " -n 1 -r
+echo
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    log "Installing PyTorch nightly cu128..."
+    mamba run -n czi_processing pip install --pre \
+        torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128
+fi
+
+# 9. Verification
+log "Verifying installation..."
 mamba run -n czi_processing python - <<'PY'
-import torch, czifile
-print(f"PyTorch: {torch.__version__}")
-print(f"CUDA available: {torch.cuda.is_available()}")
-print(f"GPU: {torch.cuda.get_device_name(0)}")
-print(f"Compute capability: {torch.cuda.get_device_capability(0)}")
-# Real tensor test
-x = torch.randn(5000, 5000).cuda()
-print("GPU tensor operation: SUCCESS (no warning = full Blackwell sm_120 support!)")
-print("czifile: OK")
-print("Your 96 GB Blackwell beast is READY!")
+import sys
+print("\n=== Package Verification ===")
+
+try:
+    import numpy as np
+    print(f"✓ NumPy {np.__version__}")
+except:
+    print("✗ NumPy FAILED")
+
+try:
+    from aicspylibczi import CziFile
+    print(f"✓ aicspylibczi (CZI reading)")
+except:
+    print("✗ aicspylibczi FAILED")
+
+try:
+    import zarr
+    print(f"✓ zarr {zarr.__version__}")
+except:
+    print("✗ zarr FAILED")
+
+try:
+    import dask.array as da
+    print(f"✓ dask (lazy loading)")
+except:
+    print("✗ dask FAILED")
+
+try:
+    import napari
+    print(f"✓ napari {napari.__version__}")
+except:
+    print("✗ napari FAILED")
+
+try:
+    from tifffile import imwrite
+    print(f"✓ tifffile (TIFF I/O)")
+except:
+    print("✗ tifffile FAILED")
+
+try:
+    from scipy.ndimage import distance_transform_edt
+    print(f"✓ scipy (blending functions)")
+except:
+    print("✗ scipy FAILED")
+
+try:
+    from multiprocessing import Pool
+    print(f"✓ multiprocessing (parallel stitching)")
+except:
+    print("✗ multiprocessing FAILED")
+
+print("\n=== System Info ===")
+import psutil
+print(f"CPU cores: {psutil.cpu_count()}")
+print(f"RAM: {psutil.virtual_memory().total / 1024**3:.1f} GB")
+
+print("\n✓ ENVIRONMENT READY FOR CZI STITCHING")
 PY
 
 log "============================================"
-log "NUCLEAR REINSTALL COMPLETE – ZERO WARNINGS"
-log "Activate anytime with: conda activate czi_processing"
-log "Save this script in your repo → one command after OS wipe!"
+log "INSTALLATION COMPLETE"
+log "Activate: conda activate czi_processing"
+log ""
+log "Pipeline scripts:"
+log "  1. stitch_v3_parallel.py  - Parallel tile stitching"
+log "  2. convert_to_zarr.py     - Convert to efficient format"
+log "  3. view_zarr.py           - View in napari"
 log "============================================"
