@@ -4,13 +4,21 @@ from pathlib import Path
 import numpy as np
 import zarr
 import dask.array as da
+import dask
+from dask.cache import Cache
 import napari
+from magicgui import magicgui
+
+# ==================== RAM OPTIMIZATION ====================
+# Using ~40GB of your 128GB for data caching
+cache = Cache(40e9) 
+cache.register()
+# Prevent dask from being too aggressive with memory splitting
+dask.config.set({'array.slicing.split_large_chunks': False})
+# ==========================================================
 
 def main():
-    # ==================== CONFIGURATION ====================
     ZARR_PATH = "TY-Dip_2.1.1.zarr"
-    # =======================================================
-    
     script_dir = Path(__file__).resolve().parent
     zarr_path = script_dir / ZARR_PATH
     
@@ -18,56 +26,51 @@ def main():
         print(f"ERROR: {zarr_path} does not exist")
         return 1
     
-    print(f"Opening ZARR: {zarr_path}")
-    
-    # 1. Attempt to load as a multiscale pyramid
-    # Common Zarr structures use '0', '1', '2' for downsampled levels
-    levels = ['0', '1', '2', '3', '4']
+    # Load all available pyramid levels
     multiscale_data = []
-    
-    for level in levels:
+    for level in ['0', '1', '2', '3', '4']:
         p = zarr_path / level
         if p.exists():
-            # Load each level as a lazy dask array
             multiscale_data.append(da.from_zarr(str(p)))
-            print(f"Found resolution level {level}: {multiscale_data[-1].shape}")
 
-    if not multiscale_data:
-        print("ERROR: No data levels (e.g., '0/') found in Zarr.")
-        return 1
-
-    # 2. Setup Viewer
-    viewer = napari.Viewer()
+    viewer = napari.Viewer(title="CRUK Stitched Volume - 128GB Optimized")
     
-    # 3. Add Channels
-    # We assume all levels have the same number of channels (Axis 0)
+    layers = []
     n_channels = multiscale_data[0].shape[0]
     
     for c in range(n_channels):
-        # Create a list of the specific channel for all available scales
         channel_layers = [level[c] for level in multiscale_data]
         
-        # Calculate contrast limits using a mid-resolution level if available
-        # This prevents loading the massive level '0' just for a preview
-        calc_level = min(len(channel_layers) - 1, 2) 
-        sample_data = channel_layers[calc_level]
-        
-        print(f"Calculating contrast for Channel {c} using level {calc_level}...")
-        sample_slice = sample_data[sample_data.shape[0]//2].compute()
-        p1, p99 = np.percentile(sample_slice, [1, 99.9])
+        # Calculate contrast using level 2 (fast)
+        calc_level = min(len(channel_layers) - 1, 2)
+        sample = channel_layers[calc_level][channel_layers[calc_level].shape[0]//2].compute()
+        p1, p99 = np.percentile(sample, [1, 99.9])
 
-        viewer.add_image(
+        layer = viewer.add_image(
             channel_layers,
             name=f"Channel_{c}",
             multiscale=True,
             colormap='green' if c == 0 else 'magenta',
             contrast_limits=[float(p1), float(p99)],
-            blending='additive'
+            blending='additive',
+            rendering='mip',  # Start with Maximum Intensity Projection
+            cache=True
         )
-    
-    print("\nSUCCESS: Use the '3D' button in the bottom left.")
-    print("If it still hangs, your Zarr likely lacks downsampled levels ('1', '2', etc.).")
-    
+        layers.append(layer)
+
+    # ==================== INTERACTIVE Z-SCALING ====================
+    @magicgui(auto_call=True, z_scale={'widget_type': 'FloatSlider', 'min': 0.1, 'max': 10.0, 'step': 0.1})
+    def scale_widget(z_scale: float = 1.0):
+        for layer in layers:
+            # Update only the Z-component of the scale (index 1 in C,Z,Y,X)
+            new_scale = list(layer.scale)
+            new_scale[1] = z_scale
+            layer.scale = new_scale
+
+    viewer.window.add_dock_widget(scale_widget, area='right', name="3D Geometry")
+    # ==============================================================
+
+    print("\nPRO TIP: Run with 'export NAPARI_ASYNC=1' for smoothest rotation.")
     napari.run()
     return 0
 
