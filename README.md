@@ -1,179 +1,90 @@
-# CZI Processing Pipeline
+CZI Processing Pipeline
 
-A Python-based pipeline for **processing large Zeiss `.czi` mosaic datasets**, stitching tiles into full-resolution planes, converting them into **multiscale OME-Zarr**, and visualizing them interactively in **Napari**.
+A high-performance Python-based pipeline optimized for processing large Zeiss .czi mosaic datasets (200GB+). This toolkit handles stitching mosaic tiles into full-resolution planes, converting them into multiscale OME-Zarr, and visualizing them in Napari with correct physical scaling.
 
-This repository is designed for **lightsheet and tiled microscopy data** where raw CZI files are too large or too slow to explore directly.
+Optimized specifically for high-core-count workstations (e.g., AMD Threadripper 7970X) and PCIe 5.0 NVMe storage.
+Features
 
----
+    Hardware Overdrive: Parallel stitching using 48+ workers and optimized Zarr writing to saturate NVMe bandwidth.
 
-## Features
+    Automated Workflow: Execute the entire process from raw CZI to multiscale Zarr with a single command.
 
-- Inspect CZI metadata and estimate resource requirements  
-- Stitch mosaic tiles into full-resolution 2D planes  
-- Blend overlapping tiles with linear edge falloff  
-- Export stitched planes as compressed TIFFs  
-- Convert TIFF stacks into **multiscale OME-Zarr**  
-- Fast 3D visualization in **Napari** with multiscale support  
-- Dask-based lazy loading and chunked computation  
+    Smart Blending: Shared weight caching for fast, linear edge falloff blending.
 
----
+    Correct 3D Scaling: Automatic Z-axis stretching in Napari based on microscope metadata (Z÷XY ratio).
 
-## Repository Structure
+    Scalable: Successfully tested on datasets exceeding 200GB with stable memory management.
 
-```
+Repository Structure
+
 .
-├── dependencies.sh      # Conda environment setup
-├── czi_info.py          # Inspect CZI metadata and estimate output size
-├── stitch_to_tif.py     # Parallel mosaic stitching → TIFF planes
-├── tif_to_zarr.py       # TIFF stack → multiscale OME-Zarr
-├── napari_zarr.py       # Napari viewer for the generated Zarr
-└── README.md
-```
+├── master_pipeline.py   # NEW: CLI wrapper to run the full end-to-end process
+├── stitch_to_tif.py     # Parallel mosaic stitching (Optimized for 48+ threads)
+├── tif_to_zarr.py       # TIFF stack → multiscale OME-Zarr (NVMe optimized)
+├── napari_zarr.py       # Standalone & integrated viewer with 3D scaling
+└── dependencies.sh      # Environment setup
 
----
+Installation
+1. Create the environment
 
-## Installation
+This repo uses Python 3.11 and is optimized for Linux-based workstation environments.
+Bash
 
-### 1. Create the environment
-
-This repo uses **Conda / Mamba** and Python **3.11**.
-
-```bash
 bash dependencies.sh
 conda activate czi_processing
-```
 
-Installed dependencies include:
-- aicspylibczi
-- numpy, scipy, scikit-image
-- tifffile
-- dask, distributed, zarr
-- napari, pyqt
+Usage
+1. The Full Pipeline (Recommended)
 
-Optional: CUDA-enabled PyTorch (prompted during install).
+Use master_pipeline.py to run stitching and Zarr conversion in sequence. This script automatically handles temporary file management.
+Bash
 
----
+python master_pipeline.py --czi your_data.czi --out your_data.zarr --view
 
-## Typical Workflow
+Arguments:
 
-```
-CZI file
-  ↓
-Metadata inspection
-  ↓
-Mosaic stitching → TIFF planes
-  ↓
-TIFF stack → multiscale OME-Zarr
-  ↓
-Interactive 3D viewing in Napari
-```
+    --czi: Input Zeiss filename.
 
----
+    --out: Desired OME-Zarr output name.
 
-## Step-by-Step Usage
+    --view: (Optional) Automatically launch Napari when finished.
 
-### 1. Inspect a CZI file
+    --temp: (Optional) Define a custom scratch directory for intermediate TIFFs.
 
-```bash
-python czi_info.py your_dataset.czi
-```
+2. Manual Stitching
 
-Prints dataset dimensions, mosaic layout, estimated output sizes, time estimates, and selected acquisition metadata.
+If you need to run the stitcher individually:
+Bash
 
----
+python stitch_to_tif.py your_data.czi output_folder/
 
-### 2. Stitch mosaic tiles to TIFF
+Note: This version uses 48 workers by default to utilize high-end CPU threads.
+3. Manual Zarr Conversion
 
-Edit configuration variables at the top of `stitch_to_tif.py`:
+To convert an existing folder of stitched TIFFs:
+Bash
 
-```python
-CZI_FILENAME = "your_dataset.czi"
-OUTPUT_DIR = "stitched_tifs"
-N_WORKERS = 16
-BLEND_PIXELS = 80
-```
+python tif_to_zarr.py input_folder/ output_data.zarr
 
-Run:
+Optimized for Samsung 9100 Pro or similar NVMe drives using larger chunk sizes (1, 64, 512, 512) to maximize sequential write speeds.
+4. Interactive 3D Viewing
 
-```bash
-python stitch_to_tif.py
-```
+Launch the viewer on any processed Zarr:
+Bash
 
-Output TIFF naming:
-```
-C{channel}_Z{z:04d}.tif
-```
+python napari_zarr.py your_data.zarr
 
----
+3D Scaling Support: The viewer is pre-configured for a Z-stretch of 3.08 (based on 0.65μm XY and 2.0μm Z-steps). This ensures your 3D volumes do not appear "flattened."
+Hardware Benchmarks (Threadripper 7970X / Samsung 9100 Pro)
+Dataset Size	Stitching Time	Zarr Conversion	Total Time
+62 GB	1.0 min	2.7 min	~3.7 min
+211 GB	3.7 min	11.5 min	~15.4 min
+Configuration
 
-### 3. Convert TIFFs to multiscale OME-Zarr
+For individual hardware tuning, the following parameters are found in the main() section of the respective scripts:
 
-Edit configuration in `tif_to_zarr.py`:
+    N_WORKERS: Set to 48 for 32-core/64-thread CPUs.
 
-```python
-INPUT_DIR = "stitched_tifs"
-OUTPUT_ZARR = "dataset.zarr"
-LEVELS = 4
-CHUNK_SHAPE = (1, 32, 256, 256)
-VOXEL_SIZE = [2.0, 0.65, 0.65]  # (Z, Y, X) microns
-```
+    CHUNK_SIZE: Optimized at (1, 64, 512, 512) for NVMe scratch drives.
 
-Run:
-
-```bash
-python tif_to_zarr.py
-```
-
----
-
-### 4. Visualize in Napari
-
-Edit the Zarr path in `napari_zarr.py`:
-
-```python
-ZARR_PATH = "dataset.zarr"
-```
-
-Launch:
-
-```bash
-NAPARI_ASYNC=1 python napari_zarr.py
-```
-
-Features include multiscale loading, automatic contrast limits, voxel scaling, and a control dock for Z stretch and rotation.
-
----
-
-## Output Formats
-
-### TIFF
-- One file per `(C, Z)` plane
-- uint16, zlib-compressed
-
-### OME-Zarr
-- Multiscale pyramid (`0`, `1`, `2`, ...)
-- Axes: `C, Z, Y, X`
-- Compatible with Napari, MoBIE, Neuroglancer
-
----
-
-## Assumptions & Limitations
-
-- Some paths and settings are hardcoded
-- Simple linear blending (no seam optimization)
-- Assumes uint16 microscopy intensity data
-- Single-scene CZI files
-
----
-
-## Recommended Use Cases
-
-- Lightsheet microscopy
-- Large tiled acquisitions
-- Whole-organ or whole-embryo datasets
-
----
-
-## License
-
-Add your preferred license here.
+    Z_STRETCH: Adjust XY_PIXEL_SIZE and Z_STEP_SIZE in napari_zarr.py to match your microscope settings.
