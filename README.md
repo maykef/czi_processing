@@ -1,42 +1,44 @@
+I cannot provide a direct download link, but I can provide the complete, properly formatted Markdown code. You can copy this text, save it as a file named README.md in your project folder, and it will be ready for use.
 CZI Processing Pipeline
 
-A high-performance Python-based pipeline optimized for processing large Zeiss .czi mosaic datasets (200GB+). This toolkit handles stitching mosaic tiles into full-resolution planes, converting them into multiscale OME-Zarr, and visualizing them in Napari with correct physical scaling.
+A high-performance Python-based pipeline for processing large Zeiss .czi mosaic datasets (200GB+). This toolkit stitches mosaic tiles into full-resolution planes, converts them into multiscale OME-Zarr, and visualizes them in Napari with correct physical scaling.
 
-Optimized specifically for high-core-count workstations (e.g., AMD Threadripper 7970X) and PCIe 5.0 NVMe storage.
+Optimized for the AMD Threadripper 7970X and Samsung 9100 Pro hardware configuration.
 Features
 
-    Hardware Overdrive: Parallel stitching using 48+ workers and optimized Zarr writing to saturate NVMe bandwidth.
+    Hardware Overdrive: Parallel stitching using 48+ workers to saturate 32-core/64-thread CPUs.
 
-    Automated Workflow: Execute the entire process from raw CZI to multiscale Zarr with a single command.
+    NVMe Optimized: Large-chunk Zarr writing designed to hit the sequential write limits of PCIe 5.0 drives.
 
-    Smart Blending: Shared weight caching for fast, linear edge falloff blending.
+    Automated Workflow: End-to-end processing from raw CZI to multiscale Zarr with a single command.
 
     Correct 3D Scaling: Automatic Z-axis stretching in Napari based on microscope metadata (Z÷XY ratio).
 
-    Scalable: Successfully tested on datasets exceeding 200GB with stable memory management.
+    Memory Efficient: Stable processing for 200GB+ datasets within 128GB RAM limits using Dask and optimized accumulators.
 
 Repository Structure
+Plaintext
 
 .
-├── master_pipeline.py   # NEW: CLI wrapper to run the full end-to-end process
-├── stitch_to_tif.py     # Parallel mosaic stitching (Optimized for 48+ threads)
-├── tif_to_zarr.py       # TIFF stack → multiscale OME-Zarr (NVMe optimized)
-├── napari_zarr.py       # Standalone & integrated viewer with 3D scaling
-└── dependencies.sh      # Environment setup
+├── master_pipeline.py   # CLI wrapper for the full end-to-end process
+├── stitch_to_tif.py     # Parallel mosaic stitching (Argparse version) 
+├── tif_to_zarr.py       # TIFF stack → multiscale OME-Zarr (Argparse version)
+├── napari_zarr.py       # Standalone viewer with 3D scale correction
+└── dependencies.sh      # Environment setup 
 
 Installation
 1. Create the environment
 
-This repo uses Python 3.11 and is optimized for Linux-based workstation environments.
+This repo requires Python 3.11 and is optimized for Linux-based workstation environments.
 Bash
 
 bash dependencies.sh
 conda activate czi_processing
 
 Usage
-1. The Full Pipeline (Recommended)
+1. The Full Pipeline
 
-Use master_pipeline.py to run stitching and Zarr conversion in sequence. This script automatically handles temporary file management.
+Use master_pipeline.py to run stitching and Zarr conversion in sequence. This handles temporary file management and optional visualization.
 Bash
 
 python master_pipeline.py --czi your_data.czi --out your_data.zarr --view
@@ -53,38 +55,45 @@ Arguments:
 
 2. Manual Stitching
 
-If you need to run the stitcher individually:
+To run the stitcher individually on a specific file:
 Bash
 
 python stitch_to_tif.py your_data.czi output_folder/
 
-Note: This version uses 48 workers by default to utilize high-end CPU threads.
 3. Manual Zarr Conversion
 
-To convert an existing folder of stitched TIFFs:
+To convert a folder of previously stitched TIFFs into an OME-Zarr:
 Bash
 
 python tif_to_zarr.py input_folder/ output_data.zarr
 
-Optimized for Samsung 9100 Pro or similar NVMe drives using larger chunk sizes (1, 64, 512, 512) to maximize sequential write speeds.
 4. Interactive 3D Viewing
 
-Launch the viewer on any processed Zarr:
+Launch the viewer on any processed Zarr to inspect the results:
 Bash
 
 python napari_zarr.py your_data.zarr
 
-3D Scaling Support: The viewer is pre-configured for a Z-stretch of 3.08 (based on 0.65μm XY and 2.0μm Z-steps). This ensures your 3D volumes do not appear "flattened."
-Hardware Benchmarks (Threadripper 7970X / Samsung 9100 Pro)
-Dataset Size	Stitching Time	Zarr Conversion	Total Time
+3D Scaling Note: The viewer applies a Z-stretch (default: ~3.08) calculated from the 0.65μm XY and 2.0μm Z-step metadata to ensure the volume is not flattened in 3D mode.
+Performance Benchmarks (TR 7970X / Samsung 9100 Pro)
+Dataset Size	Stitching Time	Zarr Conversion	Total Pipeline Time
 62 GB	1.0 min	2.7 min	~3.7 min
 211 GB	3.7 min	11.5 min	~15.4 min
-Configuration
+Output Formats
+TIFF (Intermediate)
 
-For individual hardware tuning, the following parameters are found in the main() section of the respective scripts:
+    One file per (C, Z) plane.
 
-    N_WORKERS: Set to 48 for 32-core/64-thread CPUs.
+    uint16, zlib level 1 compressed (optimized for write speed over ratio).
 
-    CHUNK_SIZE: Optimized at (1, 64, 512, 512) for NVMe scratch drives.
+OME-Zarr (Final)
 
-    Z_STRETCH: Adjust XY_PIXEL_SIZE and Z_STEP_SIZE in napari_zarr.py to match your microscope settings.
+    Multiscale pyramid (Levels 0 through 4).
+
+    Axes: C, Z, Y, X.
+
+    Chunk Size: (1, 64, 512, 512) for high-speed I/O.
+
+License
+
+Add your preferred license here.
